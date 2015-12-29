@@ -1032,6 +1032,9 @@ class Transport (threading.Thread, ClosingContextManager):
         `Transport.auth_password` or `Transport.auth_publickey`.  Use those
         methods if you want more control.
 
+        If server is set up for multi-step authentication, this will exhaust all
+        options passed in before aborting
+
         You can use this method immediately after creating a Transport to
         negotiate encryption with a server.  If it fails, an exception will be
         thrown.  On success, the method will return cleanly, and an encrypted
@@ -1096,16 +1099,19 @@ class Transport (threading.Thread, ClosingContextManager):
                 if gss_auth and 'gssapi-with-mic' in _next_auth_step:
                     self._log(DEBUG, 'Attempting GSS-API auth... (gssapi-with-mic)')
                     _next_auth_step = self.auth_gssapi_with_mic(username, gss_host, gss_deleg_creds,
-                                                                _bypass_auth_request)
+                                                                bypass_request=_bypass_auth_request)
                 elif gss_kex and 'gss-api-keyx' in _next_auth_step:
                     self._log(DEBUG, 'Attempting GSS-API auth... (gssapi-keyex)')
-                    _next_auth_step = self.auth_gssapi_keyex(username, _bypass_auth_request)
+                    _next_auth_step = self.auth_gssapi_keyex(username,
+                                                             bypass_request=_bypass_auth_request)
                 elif pkey is not None and 'publickey' in _next_auth_step:
                     self._log(DEBUG, 'Attempting public-key auth...')
-                    _next_auth_step = self.auth_publickey(username, pkey, _bypass_auth_request)
+                    _next_auth_step = self.auth_publickey(username, pkey,
+                                                          bypass_request=_bypass_auth_request)
                 elif 'password' in _next_auth_step:
                     self._log(DEBUG, 'Attempting password auth...')
-                    _next_auth_step = self.auth_password(username, password, _bypass_auth_request)
+                    _next_auth_step = self.auth_password(username, password,
+                                                         bypass_request=_bypass_auth_request)
                 else:
                     self._log(DEBUG, 'Server only allows auth methods: %s' % _next_auth_step)
                     self._log(DEBUG, 'Aborting connection auth loop')
@@ -1217,7 +1223,8 @@ class Transport (threading.Thread, ClosingContextManager):
         self.auth_handler.auth_none(username, my_event)
         return self.auth_handler.wait_for_response(my_event)
 
-    def auth_password(self, username, password, event=None, fallback=True):
+    def auth_password(self, username, password, event=None, fallback=True,
+                      bypass_request=False):
         """
         Authenticate to the server using a password.  The username and password
         are sent over an encrypted link.
@@ -1270,7 +1277,8 @@ class Transport (threading.Thread, ClosingContextManager):
         else:
             my_event = event
         self.auth_handler = AuthHandler(self)
-        self.auth_handler.auth_password(username, password, my_event)
+        self.auth_handler.auth_password(username, password, my_event,
+                                        bypass_request=bypass_request)
         if event is not None:
             # caller wants to wait for event themselves
             return []
@@ -1296,7 +1304,7 @@ class Transport (threading.Thread, ClosingContextManager):
                 # attempt failed; just raise the original exception
                 raise e
 
-    def auth_publickey(self, username, key, event=None):
+    def auth_publickey(self, username, key, event=None, bypass_request=False):
         """
         Authenticate to the server using a private key.  The key is used to
         sign data from the server, so it must include the private part.
@@ -1337,13 +1345,14 @@ class Transport (threading.Thread, ClosingContextManager):
         else:
             my_event = event
         self.auth_handler = AuthHandler(self)
-        self.auth_handler.auth_publickey(username, key, my_event)
+        self.auth_handler.auth_publickey(username, key, my_event,
+                                         bypass_request=bypass_request)
         if event is not None:
             # caller wants to wait for event themselves
             return []
         return self.auth_handler.wait_for_response(my_event)
 
-    def auth_interactive(self, username, handler, submethods=''):
+    def auth_interactive(self, username, handler, submethods='', bypass_request=False):
         """
         Authenticate to the server interactively.  A handler is used to answer
         arbitrary questions from the server.  On many servers, this is just a
@@ -1391,10 +1400,12 @@ class Transport (threading.Thread, ClosingContextManager):
             raise SSHException('No existing session')
         my_event = threading.Event()
         self.auth_handler = AuthHandler(self)
-        self.auth_handler.auth_interactive(username, handler, my_event, submethods)
+        self.auth_handler.auth_interactive(username, handler, my_event, submethods,
+                                           bypass_request=bypass_request)
         return self.auth_handler.wait_for_response(my_event)
 
-    def auth_interactive_dumb(self, username, handler=None, submethods=''):
+    def auth_interactive_dumb(self, username, handler=None, submethods='',
+                              bypass_request=False):
         """
         Autenticate to the server interactively but dumber.
         Just print the prompt and / or instructions to stdout and send back
@@ -1413,9 +1424,11 @@ class Transport (threading.Thread, ClosingContextManager):
                     print(prompt.strip(),end=' ')
                     answers.append(raw_input())
                 return answers
-        return self.auth_interactive(username, handler, submethods)
+        return self.auth_interactive(username, handler, submethods,
+                                     bypass_request=bypass_request)
 
-    def auth_gssapi_with_mic(self, username, gss_host, gss_deleg_creds):
+    def auth_gssapi_with_mic(self, username, gss_host, gss_deleg_creds,
+                             bypass_request=False):
         """
         Authenticate to the Server using GSS-API / SSPI.
 
@@ -1436,10 +1449,11 @@ class Transport (threading.Thread, ClosingContextManager):
             raise SSHException('No existing session')
         my_event = threading.Event()
         self.auth_handler = AuthHandler(self)
-        self.auth_handler.auth_gssapi_with_mic(username, gss_host, gss_deleg_creds, my_event)
+        self.auth_handler.auth_gssapi_with_mic(username, gss_host, gss_deleg_creds, my_event,
+                                               bypass_request=False)
         return self.auth_handler.wait_for_response(my_event)
 
-    def auth_gssapi_keyex(self, username):
+    def auth_gssapi_keyex(self, username, bypass_request=False):
         """
         Authenticate to the Server with GSS-API / SSPI if GSS-API Key Exchange
         was the used key exchange method.
@@ -1461,7 +1475,8 @@ class Transport (threading.Thread, ClosingContextManager):
             raise SSHException('No existing session')
         my_event = threading.Event()
         self.auth_handler = AuthHandler(self)
-        self.auth_handler.auth_gssapi_keyex(username, my_event)
+        self.auth_handler.auth_gssapi_keyex(username, my_event,
+                                            bypass_request=bypass_request)
         return self.auth_handler.wait_for_response(my_event)
 
     def set_log_channel(self, name):
