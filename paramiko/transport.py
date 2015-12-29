@@ -1083,20 +1083,36 @@ class Transport (threading.Thread, ClosingContextManager):
                 raise SSHException('Bad host key from server')
             self._log(DEBUG, 'Host key verified (%s)' % hostkey.get_name())
 
+        # Iterate through all the necessary auth steps
+        _next_auth_step = ['gssapi-with-mic',
+                           'gss-api-keyx',
+                           'keyboard-interactive',
+                           'publickey',
+                           'password',
+                           'none']
+        _bypass_auth_request = False
         if (pkey is not None) or (password is not None) or gss_auth or gss_kex:
-            if gss_auth:
-                self._log(DEBUG, 'Attempting GSS-API auth... (gssapi-with-mic)')
-                self.auth_gssapi_with_mic(username, gss_host, gss_deleg_creds)
-            elif gss_kex:
-                self._log(DEBUG, 'Attempting GSS-API auth... (gssapi-keyex)')
-                self.auth_gssapi_keyex(username)
-            elif pkey is not None:
-                self._log(DEBUG, 'Attempting public-key auth...')
-                self.auth_publickey(username, pkey)
-            else:
-                self._log(DEBUG, 'Attempting password auth...')
-                self.auth_password(username, password)
-
+            while True:
+                if gss_auth and 'gssapi-with-mic' in _next_auth_step:
+                    self._log(DEBUG, 'Attempting GSS-API auth... (gssapi-with-mic)')
+                    _next_auth_step = self.auth_gssapi_with_mic(username, gss_host, gss_deleg_creds,
+                                                                _bypass_auth_request)
+                elif gss_kex and 'gss-api-keyx' in _next_auth_step:
+                    self._log(DEBUG, 'Attempting GSS-API auth... (gssapi-keyex)')
+                    _next_auth_step = self.auth_gssapi_keyex(username, _bypass_auth_request)
+                elif pkey is not None and 'publickey' in _next_auth_step:
+                    self._log(DEBUG, 'Attempting public-key auth...')
+                    _next_auth_step = self.auth_publickey(username, pkey, _bypass_auth_request)
+                elif 'password' in _next_auth_step:
+                    self._log(DEBUG, 'Attempting password auth...')
+                    _next_auth_step = self.auth_password(username, password, _bypass_auth_request)
+                else:
+                    self._log(DEBUG, 'Server only allows auth methods: %s' % _next_auth_step)
+                    self._log(DEBUG, 'Aborting connection auth loop')
+                    break
+                _bypass_auth_request = True
+                if not _next_auth_step or self.is_authenticated():
+                    break
         return
 
     def get_exception(self):

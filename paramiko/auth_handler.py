@@ -86,29 +86,36 @@ class AuthHandler (object):
         finally:
             self.transport.lock.release()
 
-    def auth_publickey(self, username, key, event):
+    def auth_publickey(self, username, key, event, bypass_request=False):
         self.transport.lock.acquire()
         try:
             self.auth_event = event
             self.auth_method = 'publickey'
             self.username = username
             self.private_key = key
-            self._request_auth()
+            if bypass_request:
+                self._send_auth_credentials()
+            else:
+                self._request_auth()
         finally:
             self.transport.lock.release()
 
-    def auth_password(self, username, password, event):
+    def auth_password(self, username, password, event, bypass_request=False):
         self.transport.lock.acquire()
         try:
             self.auth_event = event
             self.auth_method = 'password'
             self.username = username
             self.password = password
-            self._request_auth()
+            if bypass_request:
+                self._send_auth_credentials()
+            else:
+                self._request_auth()
         finally:
             self.transport.lock.release()
 
-    def auth_interactive(self, username, handler, event, submethods=''):
+    def auth_interactive(self, username, handler, event, submethods='',
+                         bypass_request=False):
         """
         response_list = handler(title, instructions, prompt_list)
         """
@@ -119,11 +126,15 @@ class AuthHandler (object):
             self.username = username
             self.interactive_handler = handler
             self.submethods = submethods
-            self._request_auth()
+            if bypass_request:
+                self._send_auth_credentials()
+            else:
+                self._request_auth()
         finally:
             self.transport.lock.release()
 
-    def auth_gssapi_with_mic(self, username, gss_host, gss_deleg_creds, event):
+    def auth_gssapi_with_mic(self, username, gss_host, gss_deleg_creds, event,
+                             bypass_request=False):
         self.transport.lock.acquire()
         try:
             self.auth_event = event
@@ -131,17 +142,23 @@ class AuthHandler (object):
             self.username = username
             self.gss_host = gss_host
             self.gss_deleg_creds = gss_deleg_creds
-            self._request_auth()
+            if bypass_request:
+                self._send_auth_credentials()
+            else:
+                self._request_auth()
         finally:
             self.transport.lock.release()
 
-    def auth_gssapi_keyex(self, username, event):
+    def auth_gssapi_keyex(self, username, event, bypass_request=False):
         self.transport.lock.acquire()
         try:
             self.auth_event = event
             self.auth_method = 'gssapi-keyex'
             self.username = username
-            self._request_auth()
+            if bypass_request:
+                self._send_auth_credentials()
+            else:
+                self._request_auth()
         finally:
             self.transport.lock.release()
 
@@ -224,103 +241,106 @@ class AuthHandler (object):
         service = m.get_text()
         if service == 'ssh-userauth':
             self.transport._log(DEBUG, 'userauth is OK')
-            m = Message()
-            m.add_byte(cMSG_USERAUTH_REQUEST)
-            m.add_string(self.username)
-            m.add_string('ssh-connection')
-            m.add_string(self.auth_method)
-            if self.auth_method == 'password':
-                m.add_boolean(False)
-                password = bytestring(self.password)
-                m.add_string(password)
-            elif self.auth_method == 'publickey':
-                m.add_boolean(True)
-                m.add_string(self.private_key.get_name())
-                m.add_string(self.private_key)
-                blob = self._get_session_blob(self.private_key, 'ssh-connection', self.username)
-                sig = self.private_key.sign_ssh_data(blob)
-                m.add_string(sig)
-            elif self.auth_method == 'keyboard-interactive':
-                m.add_string('')
-                m.add_string(self.submethods)
-            elif self.auth_method == "gssapi-with-mic":
-                sshgss = GSSAuth(self.auth_method, self.gss_deleg_creds)
-                m.add_bytes(sshgss.ssh_gss_oids())
-                # send the supported GSSAPI OIDs to the server
-                self.transport._send_message(m)
+            self._send_auth_credentials()
+        else:
+            self.transport._log(DEBUG, 'Service request "%s" accepted (?)' % service)
+
+    def _send_auth_credentials(self):
+        m = Message()
+        m.add_byte(cMSG_USERAUTH_REQUEST)
+        m.add_string(self.username)
+        m.add_string('ssh-connection')
+        m.add_string(self.auth_method)
+        if self.auth_method == 'password':
+            m.add_boolean(False)
+            password = bytestring(self.password)
+            m.add_string(password)
+        elif self.auth_method == 'publickey':
+            m.add_boolean(True)
+            m.add_string(self.private_key.get_name())
+            m.add_string(self.private_key)
+            blob = self._get_session_blob(self.private_key, 'ssh-connection', self.username)
+            sig = self.private_key.sign_ssh_data(blob)
+            m.add_string(sig)
+        elif self.auth_method == 'keyboard-interactive':
+            m.add_string('')
+            m.add_string(self.submethods)
+        elif self.auth_method == "gssapi-with-mic":
+            sshgss = GSSAuth(self.auth_method, self.gss_deleg_creds)
+            m.add_bytes(sshgss.ssh_gss_oids())
+            # send the supported GSSAPI OIDs to the server
+            self.transport._send_message(m)
+            ptype, m = self.transport.packetizer.read_message()
+            if ptype == MSG_USERAUTH_BANNER:
+                self._parse_userauth_banner(m)
                 ptype, m = self.transport.packetizer.read_message()
-                if ptype == MSG_USERAUTH_BANNER:
-                    self._parse_userauth_banner(m)
+            if ptype == MSG_USERAUTH_GSSAPI_RESPONSE:
+                # Read the mechanism selected by the server. We send just
+                # the Kerberos V5 OID, so the server can only respond with
+                # this OID.
+                mech = m.get_string()
+                m = Message()
+                m.add_byte(cMSG_USERAUTH_GSSAPI_TOKEN)
+                m.add_string(sshgss.ssh_init_sec_context(self.gss_host,
+                                                         mech,
+                                                         self.username,))
+                self.transport._send_message(m)
+                while True:
                     ptype, m = self.transport.packetizer.read_message()
-                if ptype == MSG_USERAUTH_GSSAPI_RESPONSE:
-                    # Read the mechanism selected by the server. We send just
-                    # the Kerberos V5 OID, so the server can only respond with
-                    # this OID.
-                    mech = m.get_string()
-                    m = Message()
-                    m.add_byte(cMSG_USERAUTH_GSSAPI_TOKEN)
-                    m.add_string(sshgss.ssh_init_sec_context(self.gss_host,
-                                                             mech,
-                                                             self.username,))
-                    self.transport._send_message(m)
-                    while True:
-                        ptype, m = self.transport.packetizer.read_message()
-                        if ptype == MSG_USERAUTH_GSSAPI_TOKEN:
-                            srv_token = m.get_string()
-                            next_token = sshgss.ssh_init_sec_context(self.gss_host,
-                                                                     mech,
-                                                                     self.username,
-                                                                     srv_token)
-                            # After this step the GSSAPI should not return any
-                            # token. If it does, we keep sending the token to
-                            # the server until no more token is returned.
-                            if next_token is None:
-                                break
-                            else:
-                                m = Message()
-                                m.add_byte(cMSG_USERAUTH_GSSAPI_TOKEN)
-                                m.add_string(next_token)
-                                self.transport.send_message(m)
-                    else:
-                        raise SSHException("Received Package: %s" % MSG_NAMES[ptype])
-                    m = Message()
-                    m.add_byte(cMSG_USERAUTH_GSSAPI_MIC)
+                    if ptype == MSG_USERAUTH_GSSAPI_TOKEN:
+                        srv_token = m.get_string()
+                        next_token = sshgss.ssh_init_sec_context(self.gss_host,
+                                                                 mech,
+                                                                 self.username,
+                                                                 srv_token)
+                        # After this step the GSSAPI should not return any
+                        # token. If it does, we keep sending the token to
+                        # the server until no more token is returned.
+                        if next_token is None:
+                            break
+                        else:
+                            m = Message()
+                            m.add_byte(cMSG_USERAUTH_GSSAPI_TOKEN)
+                            m.add_string(next_token)
+                            self.transport.send_message(m)
+                else:
+                    raise SSHException("Received Package: %s" % MSG_NAMES[ptype])
+                m = Message()
+                m.add_byte(cMSG_USERAUTH_GSSAPI_MIC)
                     # send the MIC to the server
-                    m.add_string(sshgss.ssh_get_mic(self.transport.session_id))
-                elif ptype == MSG_USERAUTH_GSSAPI_ERRTOK:
-                    # RFC 4462 says we are not required to implement GSS-API
-                    # error messages.
-                    # See RFC 4462 Section 3.8 in
-                    # http://www.ietf.org/rfc/rfc4462.txt
-                    raise SSHException("Server returned an error token")
-                elif ptype == MSG_USERAUTH_GSSAPI_ERROR:
-                    maj_status = m.get_int()
-                    min_status = m.get_int()
-                    err_msg = m.get_string()
-                    lang_tag = m.get_string()  # we don't care!
-                    raise SSHException("GSS-API Error:\nMajor Status: %s\n\
+                m.add_string(sshgss.ssh_get_mic(self.transport.session_id))
+            elif ptype == MSG_USERAUTH_GSSAPI_ERRTOK:
+                # RFC 4462 says we are not required to implement GSS-API
+                # error messages.
+                # See RFC 4462 Section 3.8 in
+                # http://www.ietf.org/rfc/rfc4462.txt
+                raise SSHException("Server returned an error token")
+            elif ptype == MSG_USERAUTH_GSSAPI_ERROR:
+                maj_status = m.get_int()
+                min_status = m.get_int()
+                err_msg = m.get_string()
+                lang_tag = m.get_string()  # we don't care!
+                raise SSHException("GSS-API Error:\nMajor Status: %s\n\
                                         Minor Status: %s\ \nError Message:\
                                          %s\n") % (str(maj_status),
                                                    str(min_status),
                                                    err_msg)
-                elif ptype == MSG_USERAUTH_FAILURE:
-                    self._parse_userauth_failure(m)
-                    return
-                else:
-                    raise SSHException("Received Package: %s" % MSG_NAMES[ptype])
-            elif self.auth_method == 'gssapi-keyex' and\
-                self.transport.gss_kex_used:
-                kexgss = self.transport.kexgss_ctxt
-                kexgss.set_username(self.username)
-                mic_token = kexgss.ssh_get_mic(self.transport.session_id)
-                m.add_string(mic_token)
-            elif self.auth_method == 'none':
-                pass
+            elif ptype == MSG_USERAUTH_FAILURE:
+                self._parse_userauth_failure(m)
+                return
             else:
-                raise SSHException('Unknown auth method "%s"' % self.auth_method)
-            self.transport._send_message(m)
+                raise SSHException("Received Package: %s" % MSG_NAMES[ptype])
+        elif self.auth_method == 'gssapi-keyex' and\
+                self.transport.gss_kex_used:
+            kexgss = self.transport.kexgss_ctxt
+            kexgss.set_username(self.username)
+            mic_token = kexgss.ssh_get_mic(self.transport.session_id)
+            m.add_string(mic_token)
+        elif self.auth_method == 'none':
+            pass
         else:
-            self.transport._log(DEBUG, 'Service request "%s" accepted (?)' % service)
+            raise SSHException('Unknown auth method "%s"' % self.auth_method)
+        self.transport._send_message(m)
 
     def _send_auth_result(self, username, method, result):
         # okay, send result
